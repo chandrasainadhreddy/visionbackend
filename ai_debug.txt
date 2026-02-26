@@ -1,0 +1,2 @@
+"C:\Users\VAMSI BOGGULA\AppData\Local\Programs\Python\Python310\python.exe" "C:\xampp\htdocs\binocularai\live_assessment.py" 30 2>&1
+Needs Attention,35

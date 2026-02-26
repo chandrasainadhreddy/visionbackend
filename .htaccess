@@ -1,0 +1,11 @@
+RewriteEngine On
+RewriteBase /binocularai/
+
+# API routing - remove .php extension
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^api/test/start$ api/test/start.php [L]
+RewriteRule ^api/test/ran$ api/test/ran.php [L]
+RewriteRule ^api/test/vrg$ api/test/vrg.php [L]
+RewriteRule ^api/test/pur$ api/test/pur.php [L]
+RewriteRule ^api/eye-data$ api/eye-data.php [L]
