@@ -22,7 +22,7 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
-
+# this is binacular secret key
 app.secret_key = "binocular_secret_key"
 
 # ================= FLASK-MAIL CONFIG =================
