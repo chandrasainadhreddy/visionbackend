@@ -22,7 +22,7 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
-# this is binacular secret key
+
 app.secret_key = "binocular_secret_key"
 
 # ================= FLASK-MAIL CONFIG =================
@@ -98,6 +98,7 @@ else:
 def home():
     return jsonify({"message": "Binocular Vision Backend Running"})
 
+
 # ================= REGISTER =================
 
 @app.route("/register", methods=["POST"])
@@ -108,17 +109,37 @@ def register():
         email = data.get("email")
         phone = data.get("phone")
         password = data.get("password")
+        confirm_password = data.get("confirm_password")
 
-        if not all([name, email, phone, password]):
+        # ✅ Check all fields
+        if not all([name, email, phone, password, confirm_password]):
             return jsonify({"status": False, "message": "All fields required"})
 
+        # ✅ Confirm password check
+        if password != confirm_password:
+            return jsonify({"status": False, "message": "Passwords do not match"})
+
+        # ✅ Strong password validation
+        # Minimum 8 chars, 1 uppercase, 1 lowercase, 1 number, 1 special char
+        pattern = r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$'
+        
+        if not re.match(pattern, password):
+            return jsonify({
+                "status": False,
+                "message": "Password must be at least 8 characters and include uppercase, lowercase, number, and special character"
+            })
+
         cur = mysql.connection.cursor()
+
+        # ✅ Check if email exists
         cur.execute("SELECT id FROM users WHERE email=%s", (email,))
         if cur.fetchone():
             return jsonify({"status": False, "message": "Email already exists"})
 
+        # ✅ Hash password
         hashed = bcrypt.generate_password_hash(password).decode("utf-8")
 
+        # ✅ Insert user
         cur.execute("""
             INSERT INTO users (name,email,phone,password)
             VALUES (%s,%s,%s,%s)
@@ -667,7 +688,7 @@ def run_ai():
                 classification = "Normal"
                 percentage = map_score(anomaly_score, -0.2920, -0.26, 95, 100)
 
-            elif anomaly_score >= -0.2940:
+            elif anomaly_score >= -0.2942:
                 classification = "Mild Issue"
                 percentage = map_score(anomaly_score, -0.2940, -0.2920, 86, 94)
 
