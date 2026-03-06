@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify, render_template_string, url_for
 from flask_cors import CORS
 from flask_bcrypt import Bcrypt
-from flask_mysqldb import MySQL
 from flask_mail import Mail, Message
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash
@@ -17,6 +16,9 @@ import re
 
 # Load environment variables from .env
 load_dotenv()
+
+import pymysql
+pymysql.install_as_MySQLdb()
 
 # ================= APP INIT =================
 
@@ -39,15 +41,17 @@ app.config.update(
 
 mail = Mail(app)
 
-# ================= DATABASE CONFIG =================
+# ================= DATABASE HELPERS =================
 
-app.config['MYSQL_HOST'] = 'localhost'
-app.config['MYSQL_USER'] = 'root'
-app.config['MYSQL_PASSWORD'] = ''
-app.config['MYSQL_DB'] = 'binoculardb'
-app.config['MYSQL_CURSORCLASS'] = 'DictCursor'
+def get_db_connection():
+    return pymysql.connect(
+        host="127.0.0.1",
+        user="root",
+        password="",
+        database="binoculardb",
+        cursorclass=pymysql.cursors.DictCursor
+    )
 
-mysql = MySQL(app)
 bcrypt = Bcrypt(app)
 
 # ================= LOAD MODELS =================
@@ -129,11 +133,13 @@ def register():
                 "message": "Password must be at least 8 characters and include uppercase, lowercase, number, and special character"
             })
 
-        cur = mysql.connection.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
 
         # ✅ Check if email exists
         cur.execute("SELECT id FROM users WHERE email=%s", (email,))
         if cur.fetchone():
+            conn.close()
             return jsonify({"status": False, "message": "Email already exists"})
 
         # ✅ Hash password
@@ -145,7 +151,8 @@ def register():
             VALUES (%s,%s,%s,%s)
         """, (name, email, phone, hashed))
 
-        mysql.connection.commit()
+        conn.commit()
+        conn.close()
 
         return jsonify({"status": True, "message": "Registration successful"})
 
@@ -161,7 +168,8 @@ def login():
         email = data.get("email")
         password = data.get("password")
 
-        cur = mysql.connection.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute("SELECT id,password FROM users WHERE email=%s", (email,))
         user = cur.fetchone()
 
@@ -190,7 +198,8 @@ def forgot_password():
         if not email:
             return jsonify({"status": False, "message": "Email required"}), 400
 
-        cursor = mysql.connection.cursor()
+        conn = get_db_connection()
+        cursor = conn.cursor()
         cursor.execute("SELECT id, name FROM users WHERE email=%s", (email,))
         user = cursor.fetchone()
 
@@ -206,7 +215,8 @@ def forgot_password():
             SET reset_token=%s, reset_token_expiry=%s
             WHERE email=%s
         """, (token, expiry, email))
-        mysql.connection.commit()
+        conn.commit()
+        conn.close()
 
         # ✅ AUTO-DETECT CURRENT SERVER (NO HARDCODE IP)
         reset_link = url_for(
@@ -247,7 +257,8 @@ If you did not request this, please ignore this email.
 
 @app.route("/reset-password/<token>", methods=["GET"])
 def reset_password_form(token):
-    cursor = mysql.connection.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
     cursor.execute("""
         SELECT id FROM users
@@ -281,7 +292,8 @@ def reset_password(token):
         if not new_password:
             return "<h3 style='color:red;'>Password is required</h3>"
 
-        cursor = mysql.connection.cursor()
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT id FROM users
@@ -302,7 +314,8 @@ def reset_password(token):
             WHERE id=%s
         """, (hashed_password, user["id"]))
 
-        mysql.connection.commit()
+        conn.commit()
+        conn.close()
 
         return """
             <h2 style="color:green;">Password updated successfully ✅</h2>
@@ -318,13 +331,15 @@ def reset_password(token):
 def profile():
     user_id = request.args.get("user_id")
 
-    cur = mysql.connection.cursor()
+    conn = get_db_connection()
+    cur = conn.cursor()
     cur.execute("SELECT id,name,email,phone FROM users WHERE id=%s", (user_id,))
     user = cur.fetchone()
 
     if not user:
+        conn.close()
         return jsonify({"status": False, "message": "Not found"})
-
+    conn.close()
     return jsonify({"status": True, "user": user})
 
 # ================= UPDATE PROFILE =================
@@ -334,7 +349,8 @@ def update_profile():
     try:
         data = request.json
 
-        cur = mysql.connection.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute("""
             UPDATE users
             SET name=%s,email=%s,phone=%s
@@ -346,7 +362,8 @@ def update_profile():
             data.get("user_id")
         ))
 
-        mysql.connection.commit()
+        conn.commit()
+        conn.close()
 
         return jsonify({"status": True, "message": "Updated"})
 
@@ -365,7 +382,8 @@ def start_test():
         if not user_id or not test_type:
             return jsonify({"status": False, "message": "Missing user_id or test_type"})
 
-        cur = mysql.connection.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
 
         # 1️⃣ Check if already running test exists
         cur.execute("""
@@ -378,6 +396,7 @@ def start_test():
         existing_test = cur.fetchone()
 
         if existing_test:
+            conn.close()
             return jsonify({
                 "status": True,
                 "test_id": existing_test["id"],
@@ -390,7 +409,8 @@ def start_test():
             VALUES (%s,%s,NOW(),'running',0)
         """, (user_id, test_type))
 
-        mysql.connection.commit()
+        conn.commit()
+        conn.close()
 
         return jsonify({
             "status": True,
@@ -406,6 +426,7 @@ def start_test():
 
 @app.route("/upload_eye_data", methods=["POST"])
 def upload_eye_data():
+    conn = None
     try:
         data = request.json
         test_id = data.get("test_id")
@@ -414,37 +435,72 @@ def upload_eye_data():
         if not test_id or not samples:
             return jsonify({"status": False, "message": "Missing data"})
 
+        if not isinstance(samples, list) or len(samples) == 0:
+            return jsonify({"status": False, "message": "samples must be a non-empty list"})
+
         rows = []
         for s in samples:
-            rows.append((
-                test_id,
-                float(s.get("n", 0)),
-                float(s.get("x", 0)),
-                float(s.get("y", 0)),
-                float(s.get("lx", 0)),
-                float(s.get("ly", 0)),
-                float(s.get("rx", 0)),
-                float(s.get("ry", 0))
-            ))
+            try:
+                rows.append((
+                    int(test_id),
+                    float(s.get("n", 0)),
+                    float(s.get("x", 0)),
+                    float(s.get("y", 0)),
+                    float(s.get("lx", 0)),
+                    float(s.get("ly", 0)),
+                    float(s.get("rx", 0)),
+                    float(s.get("ry", 0))
+                ))
+            except (ValueError, TypeError) as ve:
+                return jsonify({"status": False, "error": f"Invalid data format: {str(ve)}"}), 400
 
-        cur = mysql.connection.cursor()
-        cur.executemany("""
-            INSERT INTO eye_data
-            (test_id,n,x,y,lx,ly,rx,ry)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-        """, rows)
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # ✅ INSERT FIRST with proper error handling
+        try:
+            cur.executemany("""
+                INSERT INTO eye_data
+                (test_id,n,x,y,lx,ly,rx,ry)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            """, rows)
+        except Exception as insert_error:
+            conn.close()
+            return jsonify({
+                "status": False, 
+                "error": f"Failed to insert eye data: {str(insert_error)}"
+            }), 500
 
-        cur.execute("""
-            UPDATE tests
-            SET total_samples = total_samples + %s
-            WHERE id=%s
-        """, (len(rows), test_id))
+        # ✅ UPDATE COUNTER ONLY IF INSERT SUCCEEDED
+        try:
+            cur.execute("""
+                UPDATE tests
+                SET total_samples = total_samples + %s
+                WHERE id=%s
+            """, (len(rows), test_id))
+        except Exception as update_error:
+            conn.rollback()
+            conn.close()
+            return jsonify({
+                "status": False, 
+                "error": f"Failed to update test counter: {str(update_error)}"
+            }), 500
 
-        mysql.connection.commit()
+        conn.commit()
+        conn.close()
 
         return jsonify({"status": True, "inserted": len(rows)})
 
     except Exception as e:
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+            try:
+                conn.close()
+            except:
+                pass
         return jsonify({"status": False, "error": str(e)}), 500
 
 # ================= GET HISTORY =================
@@ -459,7 +515,8 @@ def history():
         if not user_id:
             return jsonify({"status": False, "message": "user_id required"})
 
-        cur = mysql.connection.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
 
         cur.execute("""
             SELECT 
@@ -476,6 +533,7 @@ def history():
         """, (user_id,))
 
         rows = cur.fetchall()
+        conn.close()
 
         history_list = []
 
@@ -507,7 +565,8 @@ def home_dashboard():
         if not user_id:
             return jsonify({"status": False, "message": "user_id required"})
 
-        cursor = mysql.connection.cursor()
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
         # 🔹 Get latest completed test
         cursor.execute("""
@@ -577,7 +636,8 @@ def run_ai():
         if not test_id:
             return jsonify({"status": False, "error": "Missing test_id"})
 
-        cursor = mysql.connection.cursor()
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
         # -------------------------------------------------
         # 1️⃣ Get test type
@@ -586,6 +646,7 @@ def run_ai():
         test_row = cursor.fetchone()
 
         if not test_row:
+            conn.close()
             return jsonify({"status": False, "error": "Invalid test_id"})
 
         test_type = str(test_row["test_type"]).strip().lower()
@@ -605,6 +666,7 @@ def run_ai():
         rows = cursor.fetchall()
 
         if not rows:
+            conn.close()
             return jsonify({"status": False, "error": "No eye data found"})
 
         df = pd.DataFrame(rows)
@@ -650,7 +712,7 @@ def run_ai():
                 classification = "Normal"
                 percentage = map_score(anomaly_score, -0.2220, -0.15, 95, 100)
 
-            elif anomaly_score >= -0.2295:
+            elif anomaly_score >= -0.2321:
                 classification = "Mild Issue"
                 percentage = map_score(anomaly_score, -0.2295, -0.2220, 86, 94)
 
@@ -688,7 +750,7 @@ def run_ai():
                 classification = "Normal"
                 percentage = map_score(anomaly_score, -0.2920, -0.26, 95, 100)
 
-            elif anomaly_score >= -0.2942:
+            elif anomaly_score >= -0.2955:
                 classification = "Mild Issue"
                 percentage = map_score(anomaly_score, -0.2940, -0.2920, 86, 94)
 
@@ -750,7 +812,8 @@ def run_ai():
             WHERE id=%s
         """, (test_id,))
 
-        mysql.connection.commit()
+        conn.commit()
+        conn.close()
 
         return jsonify({
             "status": True,
@@ -775,7 +838,8 @@ def run_ai():
 def get_result():
     test_id = request.args.get("test_id")
 
-    cur = mysql.connection.cursor()
+    conn = get_db_connection()
+    cur = conn.cursor()
     cur.execute("""
         SELECT classification, score, percentage,
                stability, tracking, accuracy, reaction
@@ -785,7 +849,9 @@ def get_result():
     result = cur.fetchone()
 
     if not result:
+        conn.close()
         return jsonify({"status": False, "message": "Result not ready"})
+    conn.close()
 
     return jsonify({
         "status": True,
