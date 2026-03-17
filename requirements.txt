@@ -3,4 +3,5 @@ flask-mysqldb
 flask-bcrypt
 flask-cors
 Flask-Mail
+Flask-JWT-Extended
 python-dotenv

@@ -1,7 +1,9 @@
-from flask import Flask, request, jsonify, render_template_string, url_for
+from flask import Flask, request, jsonify, render_template_string, url_for, send_from_directory
+from werkzeug.utils import secure_filename
 from flask_cors import CORS
 from flask_bcrypt import Bcrypt
 from flask_mail import Mail, Message
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash
 from dotenv import load_dotenv
@@ -13,6 +15,7 @@ import os
 import joblib
 import secrets
 import re
+import time
 
 # Load environment variables from .env
 load_dotenv()
@@ -26,6 +29,16 @@ app = Flask(__name__)
 CORS(app)
 
 app.secret_key = "binocular_secret_key"
+
+# ================= JWT CONFIG =================
+app.config['JWT_SECRET_KEY'] = "binocular_jwt_secret_key"
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=30)
+jwt = JWTManager(app)
+
+# ================= UPLOAD CONFIG =================
+UPLOAD_FOLDER = 'uploads/profile_images'
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # ================= FLASK-MAIL CONFIG =================
 
@@ -43,14 +56,26 @@ mail = Mail(app)
 
 # ================= DATABASE HELPERS =================
 
-def get_db_connection():
-    return pymysql.connect(
-        host="127.0.0.1",
-        user="root",
-        password="",
-        database="binoculardb",
-        cursorclass=pymysql.cursors.DictCursor
-    )
+def get_db_connection(max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            return pymysql.connect(
+                host="127.0.0.1",
+                port=3306,
+                user="root",
+                password="",
+                database="binoculardb",
+                cursorclass=pymysql.cursors.DictCursor,
+                autocommit=True,
+                connect_timeout=10,
+                read_timeout=10,
+                write_timeout=10
+            )
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+            print(f"Database connection attempt {attempt + 1} failed, retrying...")
+            time.sleep(1)  # Wait 1 second before retry
 
 bcrypt = Bcrypt(app)
 
@@ -102,6 +127,17 @@ else:
 def home():
     return jsonify({"message": "Binocular Vision Backend Running"})
 
+@app.route("/test-db")
+def test_db():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 as test")
+        result = cur.fetchone()
+        conn.close()
+        return jsonify({"status": True, "message": "Database connected successfully", "test": result})
+    except Exception as e:
+        return jsonify({"status": False, "message": "Database connection failed", "error": str(e)})
 
 # ================= REGISTER =================
 
@@ -172,6 +208,7 @@ def login():
         cur = conn.cursor()
         cur.execute("SELECT id,password FROM users WHERE email=%s", (email,))
         user = cur.fetchone()
+        conn.close()
 
         if not user:
             return jsonify({"status": False, "message": "User not found"})
@@ -179,9 +216,13 @@ def login():
         if not bcrypt.check_password_hash(user["password"], password):
             return jsonify({"status": False, "message": "Invalid password"})
 
+        # Generate JWT token
+        access_token = create_access_token(identity=user["id"])
+
         return jsonify({
             "status": True,
-            "user_id": user["id"]
+            "user_id": user["id"],
+            "access_token": access_token
         })
 
     except Exception as e:
@@ -333,7 +374,7 @@ def profile():
 
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT id,name,email,phone FROM users WHERE id=%s", (user_id,))
+    cur.execute("SELECT id,name,email,phone,profile_image FROM users WHERE id=%s", (user_id,))
     user = cur.fetchone()
 
     if not user:
@@ -366,6 +407,207 @@ def update_profile():
         conn.close()
 
         return jsonify({"status": True, "message": "Updated"})
+
+    except Exception as e:
+        return jsonify({"status": False, "error": str(e)}), 500
+
+# ================= UPDATE PROFILE WITH IMAGE =================
+
+@app.route("/update_profile_with_image", methods=["POST"])
+def update_profile_with_image():
+    try:
+        # Get text data from form
+        user_id = request.form.get("user_id")
+        name = request.form.get("name")
+        email = request.form.get("email")
+        phone = request.form.get("phone")
+
+        if not user_id:
+            return jsonify({"status": False, "message": "user_id is required"}), 400
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Handle image upload if provided
+        image_path = None
+        if 'image' in request.files and request.files['image'].filename != '':
+            file = request.files['image']
+            filename = secure_filename(file.filename)
+            ext = os.path.splitext(filename)[1]
+            new_filename = f"user_{user_id}{ext}"
+
+            save_path = os.path.join(app.config["UPLOAD_FOLDER"], new_filename)
+            file.save(save_path)
+
+            image_path = f"uploads/profile_images/{new_filename}"
+
+        # Build dynamic update query
+        update_fields = []
+        update_values = []
+
+        if name:
+            update_fields.append("name=%s")
+            update_values.append(name)
+        if email:
+            update_fields.append("email=%s")
+            update_values.append(email)
+        if phone:
+            update_fields.append("phone=%s")
+            update_values.append(phone)
+        if image_path:
+            update_fields.append("profile_image=%s")
+            update_values.append(image_path)
+
+        if not update_fields:
+            conn.close()
+            return jsonify({"status": False, "message": "No fields to update"}), 400
+
+        update_values.append(user_id)
+
+        query = f"""
+            UPDATE users
+            SET {', '.join(update_fields)}
+            WHERE id=%s
+        """
+
+        cur.execute(query, update_values)
+        conn.commit()
+        conn.close()
+
+        response = {
+            "status": True,
+            "message": "Profile updated successfully"
+        }
+
+        if image_path:
+            response["image_path"] = image_path
+            response["image_url"] = request.host_url + image_path
+
+        return jsonify(response)
+
+    except Exception as e:
+        return jsonify({"status": False, "error": str(e)}), 500
+
+# ================= UPLOAD PROFILE IMAGE =================
+
+@app.route('/api/upload_profile', methods=['POST'])
+def upload_profile():
+    try:
+        user_id = request.form.get('user_id')
+        
+        if not user_id:
+            return jsonify({"status": False, "message": "user_id is required"}), 400
+
+        if 'image' not in request.files:
+            return jsonify({"status": False, "message": "No image uploaded"}), 400
+
+        image = request.files['image']
+        if image.filename == '':
+            return jsonify({"status": False, "message": "No selected file"}), 400
+
+        filename = secure_filename(image.filename)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        image.save(filepath)
+
+        # Save path in database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET profile_image=%s WHERE id=%s",
+            (filename, user_id)
+        )
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "status": True,
+            "message": "Profile image uploaded",
+            "image": filename
+        })
+    except Exception as e:
+        return jsonify({"status": False, "error": str(e)}), 500
+
+# ================= GET PROFILE IMAGE =================
+
+@app.route('/uploads/profile_images/<filename>')
+def get_image(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+# ================= PROFILE IMAGE UPLOAD =================
+
+@app.route('/api/user/upload-profile-image', methods=['POST'])
+def upload_profile_image():
+    try:
+        user_id = request.form.get("user_id")
+
+        if not user_id:
+            return jsonify({"status": False, "message": "user_id is required"}), 400
+
+        if 'image' not in request.files:
+            return jsonify({"status": False, "message": "No image file provided"}), 400
+
+        file = request.files['image']
+
+        if file.filename == '':
+            return jsonify({"status": False, "message": "No selected file"}), 400
+
+        filename = secure_filename(file.filename)
+        ext = os.path.splitext(filename)[1]
+        new_filename = f"user_{user_id}{ext}"
+
+        save_path = os.path.join(app.config["UPLOAD_FOLDER"], new_filename)
+        file.save(save_path)
+
+        image_path = f"uploads/profile_images/{new_filename}"
+
+        # Save path in database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET profile_image=%s WHERE id=%s",
+            (image_path, user_id)
+        )
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "status": True,
+            "message": "Profile image uploaded successfully",
+            "image_path": image_path,
+            "image_url": request.host_url + image_path
+        }), 200
+
+    except Exception as e:
+        return jsonify({"status": False, "error": str(e)}), 500
+
+# ================= JWT-PROTECTED GET USER PROFILE =================
+
+@app.route('/api/user/profile', methods=['GET'])
+@jwt_required()
+def get_user_profile():
+    try:
+        user_id = get_jwt_identity()
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, email, phone, profile_image FROM users WHERE id=%s", (user_id,))
+        user = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if not user:
+            return jsonify({"status": False, "message": "User not found"}), 404
+
+        return jsonify({
+            "status": True,
+            "user": {
+                "id": user["id"],
+                "name": user["name"],
+                "email": user["email"],
+                "phone": user.get("phone"),
+                "profile_image": request.host_url + user["profile_image"] if user["profile_image"] else None
+            }
+        }), 200
 
     except Exception as e:
         return jsonify({"status": False, "error": str(e)}), 500
@@ -708,7 +950,7 @@ def run_ai():
 
         if test_type == "ran":
 
-            if anomaly_score >= -0.2220:
+            if anomaly_score >= -0.2307:
                 classification = "Normal"
                 percentage = map_score(anomaly_score, -0.2220, -0.15, 95, 100)
 
@@ -727,9 +969,9 @@ def run_ai():
 
         elif test_type == "vrg":
 
-            if anomaly_score >= -0.3428:
+            if anomaly_score >= -0.0781:
                 classification = "Normal"
-                percentage = map_score(anomaly_score, -0.3428, -0.30, 95, 100)
+                percentage = map_score(anomaly_score, -0.0780, -0.05, 95, 100)
 
             elif anomaly_score >= -0.3431:
                 classification = "Mild Issue"
@@ -750,7 +992,7 @@ def run_ai():
                 classification = "Normal"
                 percentage = map_score(anomaly_score, -0.2920, -0.26, 95, 100)
 
-            elif anomaly_score >= -0.2955:
+            elif anomaly_score >= -0.2985:
                 classification = "Mild Issue"
                 percentage = map_score(anomaly_score, -0.2940, -0.2920, 86, 94)
 
@@ -882,5 +1124,11 @@ def test_mail():
 # ================= RUN SERVER =================
 
 if __name__ == "__main__":
+    try:
+        conn = get_db_connection()
+        print("✅ Database connected successfully")
+        conn.close()
+    except Exception as e:
+        print("❌ Database connection failed:", str(e))
     app.run(host="0.0.0.0", port=5000, debug=True)
 
