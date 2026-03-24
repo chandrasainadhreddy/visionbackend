@@ -342,7 +342,7 @@ def forgot_password():
             recipients=[email]
         )
 
-        msg.body = f"""
+        msg.body = f"""0
 Hello {user['name']},
 
 Click the link below to reset your password:
