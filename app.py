@@ -77,6 +77,39 @@ def get_db_connection(max_retries=3):
             print(f"Database connection attempt {attempt + 1} failed, retrying...")
             time.sleep(1)  # Wait 1 second before retry
 
+# ================= EMAIL VALIDATION =================
+
+def is_valid_email(email):
+    if not email or not isinstance(email, str):
+        return False
+    pattern = r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
+    return re.match(pattern, email) is not None
+
+# ================= PHONE VALIDATION =================
+
+def is_valid_phone(phone):
+    if not phone or not isinstance(phone, str):
+        return False
+    pattern = r'^[0-9]{10}$'
+    return re.match(pattern, phone) is not None
+
+# ================= NAME VALIDATION =================
+
+def is_valid_name(name):
+    if not name or not isinstance(name, str):
+        return False
+    pattern = r'^[A-Za-z]+(?: [A-Za-z]+)*$'
+    return re.match(pattern, name.strip()) is not None
+
+# ================= STRONG PASSWORD VALIDATION =================
+
+def is_strong_password(password):
+    if not password or not isinstance(password, str):
+        return False
+    # At least 8 chars, 1 uppercase, 1 lowercase, 1 digit, 1 special char
+    pattern = r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&^#()[\]{}_{}_\-+=|\\/.,:;~`])[A-Za-z\d@$!%*?&^#()[\]{}_{}_\-+=|\\/.,:;~`]{8,}$'
+    return re.match(pattern, password) is not None
+
 bcrypt = Bcrypt(app)
 
 # ================= LOAD MODELS =================
@@ -144,56 +177,96 @@ def test_db():
 @app.route("/register", methods=["POST"])
 def register():
     try:
-        data = request.json
-        name = data.get("name")
-        email = data.get("email")
-        phone = data.get("phone")
-        password = data.get("password")
-        confirm_password = data.get("confirm_password")
+        data = request.get_json()
 
-        # ✅ Check all fields
+        name = data.get("name", "").strip()
+        email = data.get("email", "").strip()
+        phone = data.get("phone", "").strip()
+        password = data.get("password", "")
+        confirm_password = data.get("confirm_password", "")
+
+        # 1. Required fields
         if not all([name, email, phone, password, confirm_password]):
-            return jsonify({"status": False, "message": "All fields required"})
+            return jsonify({"status": False, "message": "All fields are required"}), 400
 
-        # ✅ Confirm password check
-        if password != confirm_password:
-            return jsonify({"status": False, "message": "Passwords do not match"})
+        # 2. Username validation
+        if not is_valid_name(name):
+            return jsonify({
+                "status": False,
+                "message": "Username must contain letters only"
+            }), 400
 
-        # ✅ Strong password validation
-        # Minimum 8 chars, 1 uppercase, 1 lowercase, 1 number, 1 special char
-        pattern = r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$'
-        
-        if not re.match(pattern, password):
+        # 3. Email validation
+        if not is_valid_email(email):
+            return jsonify({
+                "status": False,
+                "message": "Enter a valid email address"
+            }), 400
+
+        # 4. Phone validation
+        if not is_valid_phone(phone):
+            return jsonify({
+                "status": False,
+                "message": "Phone number must be exactly 10 digits"
+            }), 400
+
+        # 5. Password strength validation
+        if not is_strong_password(password):
             return jsonify({
                 "status": False,
                 "message": "Password must be at least 8 characters and include uppercase, lowercase, number, and special character"
-            })
+            }), 400
+
+        # 6. Confirm password validation
+        if password != confirm_password:
+            return jsonify({
+                "status": False,
+                "message": "Password and confirm password do not match"
+            }), 400
 
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # ✅ Check if email exists
+        # 7. Check email already exists
         cur.execute("SELECT id FROM users WHERE email=%s", (email,))
         if cur.fetchone():
             conn.close()
-            return jsonify({"status": False, "message": "Email already exists"})
+            return jsonify({
+                "status": False,
+                "message": "Email already exists"
+            }), 409
 
-        # ✅ Hash password
-        hashed = bcrypt.generate_password_hash(password).decode("utf-8")
+        # 8. Check phone already exists (optional but recommended)
+        cur.execute("SELECT id FROM users WHERE phone=%s", (phone,))
+        if cur.fetchone():
+            conn.close()
+            return jsonify({
+                "status": False,
+                "message": "Phone number already exists"
+            }), 409
 
-        # ✅ Insert user
+        # 9. Hash password
+        hashed_password = bcrypt.generate_password_hash(password).decode("utf-8")
+
+        # 10. Insert user
         cur.execute("""
-            INSERT INTO users (name,email,phone,password)
-            VALUES (%s,%s,%s,%s)
-        """, (name, email, phone, hashed))
+            INSERT INTO users (name, email, phone, password)
+            VALUES (%s, %s, %s, %s)
+        """, (name, email, phone, hashed_password))
 
         conn.commit()
         conn.close()
 
-        return jsonify({"status": True, "message": "Registration successful"})
+        return jsonify({
+            "status": True,
+            "message": "Registration successful"
+        }), 201
 
     except Exception as e:
-        return jsonify({"status": False, "error": str(e)}), 500
+        return jsonify({
+            "status": False,
+            "error": str(e)
+        }), 500
 
 # ================= LOGIN =================
 
@@ -259,12 +332,9 @@ def forgot_password():
         conn.commit()
         conn.close()
 
-        # ✅ AUTO-DETECT CURRENT SERVER (NO HARDCODE IP)
-        reset_link = url_for(
-            "reset_password_form",
-            token=token,
-            _external=True
-        )
+        # ✅ USE THIS (VERY IMPORTANT)
+        BASE_URL = "http://10.250.44.240:5000"
+        reset_link = f"{BASE_URL}/reset-password/{token}"
 
         # Send Email
         msg = Message(
@@ -275,22 +345,16 @@ def forgot_password():
         msg.body = f"""
 Hello {user['name']},
 
-You requested to reset your password.
+Click the link below to reset your password:
 
-Click the link below to reset it:
 {reset_link}
 
-This link will expire in 15 minutes.
-
-If you did not request this, please ignore this email.
+Expires in 15 minutes.
 """
 
         mail.send(msg)
 
-        return jsonify({
-            "status": True,
-            "message": "Reset link sent to your email"
-        })
+        return jsonify({"status": True, "message": "Reset link sent"})
 
     except Exception as e:
         return jsonify({"status": False, "error": str(e)}), 500
@@ -332,6 +396,9 @@ def reset_password(token):
 
         if not new_password:
             return "<h3 style='color:red;'>Password is required</h3>"
+
+        if not is_strong_password(new_password):
+            return "<h3 style='color:red;'>Password must be at least 8 characters and include uppercase, lowercase, number, and special character</h3>"
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -388,25 +455,53 @@ def profile():
 @app.route("/update_profile", methods=["PUT"])
 def update_profile():
     try:
-        data = request.json
+        data = request.get_json()
+
+        user_id = data.get("user_id")
+        name = data.get("name", "").strip()
+        email = data.get("email", "").strip()
+        phone = data.get("phone", "").strip()
+
+        if not user_id:
+            return jsonify({"status": False, "message": "user_id is required"}), 400
+
+        if not all([name, email, phone]):
+            return jsonify({"status": False, "message": "Name, email and phone are required"}), 400
+
+        if not is_valid_name(name):
+            return jsonify({"status": False, "message": "Username must contain letters only"}), 400
+
+        if not is_valid_email(email):
+            return jsonify({"status": False, "message": "Enter a valid email address"}), 400
+
+        if not is_valid_phone(phone):
+            return jsonify({"status": False, "message": "Phone number must be exactly 10 digits"}), 400
 
         conn = get_db_connection()
         cur = conn.cursor()
+
+        # avoid duplicate email for another user
+        cur.execute("SELECT id FROM users WHERE email=%s AND id!=%s", (email, user_id))
+        if cur.fetchone():
+            conn.close()
+            return jsonify({"status": False, "message": "Email already used by another account"}), 409
+
+        # avoid duplicate phone for another user
+        cur.execute("SELECT id FROM users WHERE phone=%s AND id!=%s", (phone, user_id))
+        if cur.fetchone():
+            conn.close()
+            return jsonify({"status": False, "message": "Phone already used by another account"}), 409
+
         cur.execute("""
             UPDATE users
-            SET name=%s,email=%s,phone=%s
+            SET name=%s, email=%s, phone=%s
             WHERE id=%s
-        """, (
-            data.get("name"),
-            data.get("email"),
-            data.get("phone"),
-            data.get("user_id")
-        ))
+        """, (name, email, phone, user_id))
 
         conn.commit()
         conn.close()
 
-        return jsonify({"status": True, "message": "Updated"})
+        return jsonify({"status": True, "message": "Profile updated successfully"}), 200
 
     except Exception as e:
         return jsonify({"status": False, "error": str(e)}), 500
@@ -1105,6 +1200,55 @@ def get_result():
         "accuracy": float(result["accuracy"]),
         "reaction": float(result["reaction"])
     })
+
+# ================= DELETE TEST =================
+
+@app.route("/delete_test/<int:test_id>", methods=["DELETE"])
+def delete_test(test_id):
+    try:
+        user_id = request.args.get("user_id")
+
+        if not user_id:
+            return jsonify({
+                "status": False,
+                "message": "user_id is required"
+            }), 400
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Verify test belongs to user
+        cur.execute(
+            "SELECT id FROM tests WHERE id=%s AND user_id=%s",
+            (test_id, user_id)
+        )
+        test = cur.fetchone()
+
+        if not test:
+            conn.close()
+            return jsonify({
+                "status": False,
+                "message": "Test record not found for this user"
+            }), 404
+
+        # Delete test (cascade delete will handle eye_data and results)
+        cur.execute(
+            "DELETE FROM tests WHERE id=%s AND user_id=%s",
+            (test_id, user_id)
+        )
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "status": True,
+            "message": "Test deleted successfully"
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "status": False,
+            "error": str(e)
+        }), 500
 
 # ================= TEST MAIL ENDPOINT =================
 
